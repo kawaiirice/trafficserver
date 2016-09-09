@@ -114,8 +114,8 @@ public:
   IpAllow(const char *config_var, const char *name, const char *action_val);
   ~IpAllow();
   void Print();
-  AclRecord *match(IpEndpoint const *ip) const;
-  AclRecord *match(sockaddr const *ip) const;
+  AclRecord *match(IpEndpoint const *ip, bool is_dest_ip) const;
+  AclRecord *match(sockaddr const *ip, bool is_dest_ip) const;
 
   static void startup();
   static void reconfigure();
@@ -141,22 +141,30 @@ private:
   char config_file_path[PATH_NAME_MAX];
   const char *module_name;
   const char *action;
-  IpMap _map;
-  Vec<AclRecord> _acls;
+  IpMap _src_map;
+  IpMap _dest_map;
+  Vec<AclRecord> _src_acls;
+  Vec<AclRecord> _dest_acls;
 };
 
 inline AclRecord *
-IpAllow::match(IpEndpoint const *ip) const
+IpAllow::match(IpEndpoint const *ip, bool is_dest_ip) const
 {
-  return this->match(&ip->sa);
+  return this->match(&ip->sa, is_dest_ip);
 }
 
 inline AclRecord *
-IpAllow::match(sockaddr const *ip) const
+IpAllow::match(sockaddr const *ip, bool is_dest_ip) const
 {
   void *raw;
-  if (_map.contains(ip, &raw)) {
-    return static_cast<AclRecord *>(raw);
+  if(is_dest_ip) {
+    if (_dest_map.contains(ip, &raw)) {
+        return static_cast<AclRecord *>(raw);
+    }
+  } else {
+    if (_src_map.contains(ip, &raw)) {
+      return static_cast<AclRecord *>(raw);
+    }
   }
   return NULL;
 }

@@ -111,9 +111,9 @@ void
 IpAllow::Print()
 {
   std::ostringstream s;
-  s << _map.getCount() << " ACL entries";
+  s << _src_map.getCount() + _dest_map.getCount() << " ACL entries";
   s << '.';
-  for (IpMap::iterator spot(_map.begin()), limit(_map.end()); spot != limit; ++spot) {
+  for (IpMap::iterator spot(_src_map.begin()), limit(_src_map.end()); spot != limit; ++spot) {
     char text[INET6_ADDRSTRLEN];
     AclRecord const *ar = static_cast<AclRecord const *>(spot->data());
 
@@ -153,6 +153,46 @@ IpAllow::Print()
       }
     }
   }
+  for (IpMap::iterator spot(_dest_map.begin()), limit(_dest_map.end()); spot != limit; ++spot) {
+    char text[INET6_ADDRSTRLEN];
+    AclRecord const *ar = static_cast<AclRecord const *>(spot->data());
+
+    s << std::endl << "  Line " << ar->_src_line << ": " << ats_ip_ntop(spot->min(), text, sizeof text);
+    if (0 != ats_ip_addr_cmp(spot->min(), spot->max())) {
+      s << " - " << ats_ip_ntop(spot->max(), text, sizeof text);
+    }
+    s << " method=";
+    uint32_t mask = AclRecord::ALL_METHOD_MASK & ar->_method_mask;
+    if (AclRecord::ALL_METHOD_MASK == mask) {
+      s << "ALL";
+    } else if (0 == mask) {
+      s << "NONE";
+    } else {
+      bool leader        = false; // need leading vbar?
+      uint32_t test_mask = 1;     // mask for current method.
+      for (int i = 0; i < HTTP_WKSIDX_METHODS_CNT; ++i, test_mask <<= 1) {
+        if (mask & test_mask) {
+          if (leader)
+            s << '|';
+          s << hdrtoken_index_to_wks(i + HTTP_WKSIDX_CONNECT);
+          leader = true;
+        }
+      }
+    }
+    if (!ar->_nonstandard_methods.empty()) {
+      s << " nonstandard method=";
+      bool leader = false; // need leading vbar?
+      for (AclRecord::MethodSet::iterator iter = ar->_nonstandard_methods.begin(), end = ar->_nonstandard_methods.end();
+           iter != end; ++iter) {
+        if (leader) {
+          s << '|';
+        }
+        s << *iter;
+        leader = true;
+      }
+    }
+  }  
+
   Debug("ip-allow", "%s", s.str().c_str());
 }
 
@@ -171,7 +211,7 @@ IpAllow::BuildTable()
   bool alarmAlready = false;
 
   // Table should be empty
-  ink_assert(_map.getCount() == 0);
+  ink_assert(_src_map.getCount() == 0 && _dest_map.getCount() == 0);
 
   file_buf = readIntoBuffer(config_file_path, module_name, NULL);
 
@@ -190,9 +230,13 @@ IpAllow::BuildTable()
     }
 
     if (*line != '\0' && *line != '#') {
-      errPtr = parseConfigLine(line, &line_info, &ip_allow_tags);
-
-      if (errPtr != NULL) {
+      if(strstr(line, ip_allow_dest_tags.match_ip) != NULL) {
+        errPtr = parseConfigLine(line, &line_info, &ip_allow_dest_tags);
+      } else {
+        errPtr = parseConfigLine(line, &line_info, &ip_allow_src_tags);
+      }
+      
+      if(errPtr != NULL) {
         snprintf(errBuf, sizeof(errBuf), "%s discarding %s entry at line %d : %s", module_name, config_file_path, line_num, errPtr);
         SignalError(errBuf, alarmAlready);
       } else {
@@ -201,8 +245,7 @@ IpAllow::BuildTable()
         errPtr = ExtractIpRange(line_info.line[1][line_info.dest_entry], &addr1.sa, &addr2.sa);
 
         if (errPtr != NULL) {
-          snprintf(errBuf, sizeof(errBuf), "%s discarding %s entry at line %d : %s", module_name, config_file_path, line_num,
-                   errPtr);
+          snprintf(errBuf, sizeof(errBuf), "%s discarding %s entry at line %d : %s", module_name, config_file_path, line_num, errPtr);
           SignalError(errBuf, alarmAlready);
         } else {
           // INKqa05845
@@ -211,6 +254,7 @@ IpAllow::BuildTable()
           uint32_t acl_method_mask = 0;
           AclRecord::MethodSet nonstandard_methods;
           bool deny_nonstandard_methods = false;
+          bool is_dest_ip = (strcasecmp(line_info.line[0][line_info.dest_entry], "dest_ip") == 0);
           AclOp op                      = ACL_OP_DENY; // "shut up", I explained to the compiler.
           bool op_found = false, method_found = false;
           for (int i = 0; i < MATCHER_MAX_TOKENS; i++) {
@@ -271,10 +315,16 @@ IpAllow::BuildTable()
           }
 
           if (method_found) {
-            _acls.push_back(AclRecord(acl_method_mask, line_num, nonstandard_methods, deny_nonstandard_methods));
-            // Color with index because at this point the address
-            // is volatile.
-            _map.fill(&addr1, &addr2, reinterpret_cast<void *>(_acls.length() - 1));
+            if(is_dest_ip) {
+              _dest_acls.push_back(AclRecord(acl_method_mask, line_num, nonstandard_methods, deny_nonstandard_methods));
+              // Color with index in acls because at this point the address is volatile.
+              _dest_map.fill(&addr1, &addr2, reinterpret_cast<void *>(_dest_acls.length() - 1));
+            }
+            else {
+              _src_acls.push_back(AclRecord(acl_method_mask, line_num, nonstandard_methods, deny_nonstandard_methods));
+              // Color with index in acls because at this point the address is volatile.
+              _src_map.fill(&addr1, &addr2, reinterpret_cast<void *>(_src_acls.length() - 1));
+            }              
           } else {
             snprintf(errBuf, sizeof(errBuf), "%s discarding %s entry at line %d : %s", module_name, config_file_path, line_num,
                      "Invalid action/method specified"); // changed by YTS Team, yamsat bug id -59022
@@ -287,12 +337,16 @@ IpAllow::BuildTable()
     line = tokLine(NULL, &tok_state);
   }
 
-  if (_map.getCount() == 0) {
+  if (_src_map.getCount() == 0 && _dest_map.getCount() == 0) { // TODO: check
     Warning("%s No entries in %s. All IP Addresses will be blocked", module_name, config_file_path);
   } else {
     // convert the coloring from indices to pointers.
-    for (IpMap::iterator spot(_map.begin()), limit(_map.end()); spot != limit; ++spot) {
-      spot->setData(&_acls[reinterpret_cast<size_t>(spot->data())]);
+    for (IpMap::iterator spot(_src_map.begin()), limit(_src_map.end()); spot != limit; ++spot) {
+      spot->setData(&_src_acls[reinterpret_cast<size_t>(spot->data())]);
+    }
+  
+    for (IpMap::iterator spot(_dest_map.begin()), limit(_dest_map.end()); spot != limit; ++spot) {
+      spot->setData(&_dest_acls[reinterpret_cast<size_t>(spot->data())]);
     }
   }
 

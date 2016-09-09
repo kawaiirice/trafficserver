@@ -75,7 +75,7 @@ clear_xstr_array(char *v[], size_t vsize)
   }
 }
 
-BUILD_TABLE_INFO::BUILD_TABLE_INFO() : remap_optflg(0), paramc(0), argc(0), rules_list(NULL), rewrite(NULL)
+BUILD_TABLE_INFO::BUILD_TABLE_INFO() : remap_optflg(0), paramc(0), argc(0), ip_allow_flag(1), rules_list(NULL), rewrite(NULL)
 {
   memset(this->paramv, 0, sizeof(this->paramv));
   memset(this->argv, 0, sizeof(this->argv));
@@ -123,6 +123,9 @@ process_filter_opt(url_mapping *mp, const BUILD_TABLE_INFO *bti, char *errStrBuf
     }
     errStr = remap_validate_filter_args(rpp, (const char **)bti->argv, bti->argc, errStrBuf, errStrBufSize);
   }
+  // Copy ip_allow_flag to url_mapping
+  mp->ip_allow_flag = bti->ip_allow_flag;
+
   return errStr;
 }
 
@@ -211,6 +214,12 @@ parse_activate_directive(const char *directive, BUILD_TABLE_INFO *bti, char *err
     return (const char *)errbuf;
   }
 
+  // Check if for ip_allow filter
+  if (strcmp((const char *)bti->paramv[1], "ip_allow") == 0) {
+    bti->ip_allow_flag = 1;
+    return NULL;
+  }
+  
   if ((rp = acl_filter_rule::find_byname(bti->rules_list, (const char *)bti->paramv[1])) == NULL) {
     snprintf(errbuf, errbufsize, "Undefined filter \"%s\" in directive \"%s\"", bti->paramv[1], directive);
     Debug("url_rewrite", "[parse_directive] %s", errbuf);
@@ -230,6 +239,12 @@ parse_deactivate_directive(const char *directive, BUILD_TABLE_INFO *bti, char *e
     snprintf(errbuf, errbufsize, "Directive \"%s\" must have name argument", directive);
     Debug("url_rewrite", "[parse_directive] %s", errbuf);
     return (const char *)errbuf;
+  }
+
+    // Check if for ip_allow filter
+  if (strcmp((const char *)bti->paramv[1], "ip_allow") == 0) {
+    bti->ip_allow_flag = 0;
+    return NULL;
   }
 
   if ((rp = acl_filter_rule::find_byname(bti->rules_list, (const char *)bti->paramv[1])) == NULL) {
